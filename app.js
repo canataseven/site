@@ -1,597 +1,819 @@
-const { Client, MessageEmbed } = require("discord.js");
-const client = new Client();
-const express = require("express");
-const app = express();
-const conf = require("./src/configs/config.json");
-const settings = require("./src/configs/settings.json");
-const bodyParser = require("body-parser");
-const cookieParser = require("cookie-parser");
-const ejs = require("ejs");
-const path = require("path");
-const passport = require("passport");
-const { Strategy } = require("passport-discord");
-const session = require("express-session");
-const mongoose = require("mongoose");
-const url = require("url");
-const moment = require("moment");
-moment.locale("tr");
-const cooldown = new Map();
+const request = require('request');
+const db = require('quick.db');
+const fs = require('fs');
 
-// </> Middlewares </>
-app.engine(".ejs", ejs.__express);
-app.set("view engine", "ejs");
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ limit: "50mb", extended: false, }));
-app.use(cookieParser());
-app.set("views", path.join(__dirname, "src/views"));
-app.use(express.static(__dirname + "/src/public"));
-app.use(session({ secret: "secret-session-thing", resave: false, saveUninitialized: false, }));
+const url = require("url");
+const path = require("path");
+
+const Discord = require("discord.js");
+
+var express = require('express');
+var app = express();
+const moment = require("moment");
+require("moment-duration-format");
+
+const passport = require("passport");
+const session = require("express-session");
+const LevelStore = require("level-session-store")(session);
+const Strategy = require("passport-discord").Strategy;
+
+const helmet = require("helmet");
+
+const md = require("marked");
+
+
+
+module.exports = (client) => {
+
+const templateDir = path.resolve(`${process.cwd()}${path.sep}html`);
+
+app.use("/css", express.static(path.resolve(`${templateDir}${path.sep}css`)));
+
+passport.serializeUser((user, done) => {
+done(null, user);
+});
+passport.deserializeUser((obj, done) => {
+done(null, obj);
+});
+
+passport.use(new Strategy({
+clientID: client.user.id,
+clientSecret: client.ayarlar.oauthSecret,
+callbackURL: client.ayarlar.callbackURL,
+scope: ["identify"]
+},
+(accessToken, refreshToken, profile, done) => {
+process.nextTick(() => done(null, profile));
+}));
+
+app.use(session({
+secret: 'aKcVbK_HL09k0erK2-WfQoj4k1lKdF4J',
+resave: false,
+saveUninitialized: false,
+}));
+
 app.use(passport.initialize());
 app.use(passport.session());
-// </> Middlewares </>
+app.use(helmet());
 
-// </> Authorization </>
-passport.serializeUser((user, done) => done(null, user));
+app.locals.domain = process.env.PROJECT_DOMAIN;
 
-passport.deserializeUser((obj, done) => done(null, obj));
+app.engine("html", require("ejs").renderFile);
+app.set("view engine", "html");
 
-const scopes = ["identify", "guilds"];
-passport.use(new Strategy({
-      clientID: settings.clientID,
-      clientSecret: settings.secret,
-      callbackURL: settings.callbackURL,
-      scope: scopes,
-    },
-    (accessToken, refreshToken, profile, done) => {
-      process.nextTick(() => done(null, profile));
-    })
-);
+var bodyParser = require("body-parser");
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ 
+extended: true
+})); 
 
-app.get("/login", passport.authenticate("discord", { scope: scopes, }));
-app.get("/callback", passport.authenticate("discord", { failureRedirect: "/error", }), (req, res) => res.redirect("/"));
-app.get("/logout", (req, res) => {
-  req.logOut();
-  return res.redirect("/");
-});
-// </> Authorization </>
+function checkAuth(req, res, next) {
+if (req.isAuthenticated()) return next();
+req.session.backURL = req.url;
+res.redirect("/giris");
+}
 
-// </> DB Connection </>
-mongoose.connect(settings.mongoURL, {
-	useUnifiedTopology: true,
-	useNewUrlParser: true,
-	useFindAndModify: false,
-});
-
-mongoose.connection.on("connected", () => {
-	console.log("Connected to DB");
-});
-
-mongoose.connection.on("error", () => {
-	console.error("Connection Error!");
-});
-// </> DB Connection </>
-
-// </> Pages </>
-app.get("/", async (req, res) => {
-  const guild = client.guilds.cache.get(conf.guildID);
-  const owners = guild.members.cache.filter(x => x.roles.cache.has(conf.ownerRole));
-  const admins = guild.members.cache.filter(x => x.roles.cache.has(conf.adminRole) && !owners.find(b => x.user.id == b));
-  const codeSharers = guild.members.cache.filter(x => x.roles.cache.has(conf.codeSharer) && !owners.find(b => x.user.id == b) && !admins.find(b => x.user.id == b));
-  res.render("index", {
-    user: req.user,
-    icon: guild.iconURL({ dynamic: true }),
-    owners,
-    admins,
-    codeSharers,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/discord", (req, res) => 
-  res.render("discord", {
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    conf
-  })
-);
-
-app.get("/information", (req, res) =>
-  res.render("info", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  })
-);
-
-app.get("/profile/:userID", async (req, res) => {
-  const userID = req.params.userID;
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = guild.members.cache.get(userID);
-  if (!member) return error(res, 501, "Böyle bir kullanıcı bulunmuyor!");
-  const userData = require("./src/schemas/user");
-  const codeData = require("./src/schemas/code");
-  let data = await userData.findOne({ userID });
-  const code = await codeData.find({});
-  let auth;
-  if (member.roles.cache.has(conf.ownerRole)) auth = "Owner";
-  else if (member.roles.cache.has(conf.adminRole)) auth = "Admin";
-  else if (member.roles.cache.has(conf.codeSharer)) auth = "Code Sharer";
-  else if (member.roles.cache.has(conf.booster)) auth = "Booster";
-  else auth = "Member";
-  res.render("profile", {
-    user: req.user,
-    member,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    auth,
-    color: member.displayHexColor,
-    data: data ? data : {},
-    code,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/admin", async (req, res) => {
-  if (!req.user) return error(res, 138, "Bu sayfaya girmek için siteye giriş yapmalısın!");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = guild.members.cache.get(req.user.id);
-  if (!member) return error(res, 138, "Bu sayfaya girmek için sunuzumuza katılmalısın!");
-  if (!member.hasPermission(8)) return error(res, 401, "Bu sayfaya girmek için yetkin bulunmuyor!");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.find({}).sort({ date: -1 });
-  res.render("admin", {
-    user: req.user,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    code
-  });
-});
-
-app.get("/bug/:codeID", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Bu sayfaya girmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  res.render("bug", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null,
-    codeID: req.params.codeID
-  });
-});
-
-app.get("/bug", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Bu sayfaya girmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  res.render("bug", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null,
-  });
-});
-
-app.post("/bug", async (req, res) => {
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = req.user ? guild.members.cache.get(req.user.id) : null;
-  if (!req.user || !member) return error(res, 138, "Bu sayfaya girmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const codeData = require("./src/schemas/code");
-  console.log(req.body)
-  const code = await codeData.findOne({ id: req.body.id });
-  if (!code) return error(res, 404, req.body.id+" ID'li bir kod bulunamadı!");
-  
-  if (!code.bug) {
-    code.bug = req.body.bug;
-    code.save();
-  } else return error(res, 208, "Bu kodda zaten bug bildirildi!")
-  
-  const channel = client.channels.cache.get(conf.bugLog);
-  const embed = new MessageEmbed()
-  .setAuthor(req.user.username, member.user.avatarURL({ dynamic: true }))
-  .setThumbnail(guild.iconURL({ dynamic: true }))
-  .setTitle("Bir bug bildirildi!")
-  .setDescription(`
-• Kod adı: [${code.name}](https://${conf.domain}/${code.rank}/${req.body.id})
-• Bug bildiren: ${guild.members.cache.get(req.user.id).toString()}
-• Bug: ${req.body.bug}
-  `)
-  .setColor("RED")
-  channel.send(embed);
-  res.redirect(`/${code.rank}/${req.body.id}`);
-});
-
-app.get("/share", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Kod paylaşabilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  res.render("shareCode", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    isStaff: client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id).roles.cache.has(conf.codeSharer),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.post("/sharing", async (req, res) => {
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = req.user ? guild.members.cache.get(req.user.id) : null;
-  if (!req.user || !member) return error(res, 138, "Kod paylaşabilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const codeData = require("./src/schemas/code");
-  const userData = require("./src/schemas/user");
-  if (member && conf.notCodeSharer.some((x) => member.roles.cache.has(x) || member.user.id === x)) return error(res, 502, "Kod paylaşma iznin bulunmuyor!");
-  if (cooldown.get(req.user.id) && cooldown.get(req.user.id).count >= 3) return error(res, 429, "10 dakika içerisinde en fazla 3 kod paylaşabilirsin!");
-  const id = randomStr(8);
-  
-  let code = req.body;
-  code.id = id;
-  code.date = Date.now();
-  if (!code.sharers) code.sharers = req.user.id;
-  code.sharers = code.sharers.trim().split(" ").filter(x => guild.members.cache.get(x));
-  if (code.sharers && !code.sharers.includes(req.user.id)) code.sharers.unshift(req.user.id);
-  if (!code.modules) code.modules = "discord.js";
-  if (!code.mainCode || code.mainCode && (code.mainCode.trim().toLowerCase() === "yok" || code.mainCode.trim() === "-")) code.mainCode = "";
-  if (!code.command || code.command && (code.command.trim().toLowerCase() === "yok" || code.command.trim() === "-")) code.command = "";
-  cooldown.get(req.user.id) ? cooldown.set(req.user.id, { count: cooldown.get(req.user.id).count += 1 }) : cooldown.set(req.user.id, { count: 1 });
-  if (await cooldown.get(req.user.id).count === 1) setTimeout(() => cooldown.delete(req.user.id), 1000*60*10);
-  
-  code.sharers.map(async x => {
-    const data = await userData.findOne({ userID: x });
-    if (!data) {
-      new userData({
-        userID: x,
-        codes: [code]
-      }).save();
-    } else {
-      data.codes.push(code);
-      data.save();
-    }
-  });
-  
-  let newCodeData = new codeData({
-    name: code.name,
-    id: code.id,
-    sharers: code.sharers,
-    desc: code.desc.trim(),
-    modules: code.modules.trim(),
-    mainCode: code.mainCode.trim(),
-    command: code.command.trim(),
-    rank: code.rank,
-    date: code.date
-  }).save();
-  
-  const channel = guild.channels.cache.get(conf.codeLog);
-  let color;
-  if (code.rank === "normal") color = "#bfe1ff";
-  else if (code.rank === "gold") color = "#F1C531";
-  else if (code.rank === "diamond") color = "#3998DB";
-  else if (code.rank === "ready") color = "#f80000";
-  else if (code.rank === "fromyou") color = ""
-  const embed = new MessageEmbed()
-  .setAuthor(req.user.username, member.user.avatarURL({ dynamic: true }))
-  .setThumbnail(guild.iconURL({ dynamic: true }))
-  .setTitle(`${code.rank} kategorisinde bir kod paylaşıldı!`)
-  .setDescription(`
-  • Kod adı: [${code.name}](https://${conf.domain}/${code.rank}/${id})
-  • Kod Açıklaması: ${code.desc}
-  • Kodu paylaşan: ${member.toString()}
-  `)
-  .setColor(color)
-  channel.send(embed);
-  res.redirect(`/${code.rank}/${id}`);
-});
-
-app.get("/normal", async (req, res) => {
-  const codeData = require("./src/schemas/code");
-  const data = await codeData.find({ rank: "normal" }).sort({ date: -1 });
-  res.render("normalCodes", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data,
-    moment,
-    guild: client.guilds.cache.get(conf.guildID),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/gold", async (req, res) => {
-  const codeData = require("./src/schemas/code");
-  const data = await codeData.find({ rank: "gold" }).sort({ date: -1 });
-  res.render("goldCodes", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data,
-    moment,
-    guild: client.guilds.cache.get(conf.guildID),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/diamond", async (req, res) => {
-  const codeData = require("./src/schemas/code");
-  const data = await codeData.find({ rank: "diamond" }).sort({ date: -1 });
-  res.render("diamondCodes", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data,
-    moment,
-    guild: client.guilds.cache.get(conf.guildID),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/ready", async (req, res) => {
-  const codeData = require("./src/schemas/code");
-  const data = await codeData.find({ rank: "ready" }).sort({ date: -1 });
-  res.render("readySystems", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data,
-    moment,
-    guild: client.guilds.cache.get(conf.guildID),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/fromyou", async (req, res) => {
-  const codeData = require("./src/schemas/code");
-  const data = await codeData.find({ rank: "fromyou" }).sort({ date: -1 });
-  res.render("fromyou", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data,
-    moment,
-    guild: client.guilds.cache.get(conf.guildID),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/normal/:codeID", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Kodları görebilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = req.user ? guild.members.cache.get(req.user.id) : null;
-  if (member && !member.roles.cache.has(conf.booster) && !member.roles.cache.has(conf.ownerRole) && member.roles.cache.has(conf.adminRole)) return error(res, 501, "Bu kodu görebilmek için gerekli rolleriniz bulunmamaktadır! Lütfen bilgilendirme sayfasını okuyunuz!");
-  const codeID = req.params.codeID;
-  if (!codeID) return res.redirect("/");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ rank: "normal", id: codeID });
-  if (!code) return error(res, 404, codeID+" ID'li bir kod bulunmuyor!");
-  res.render("code", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data: code,
-    guild,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/gold/:codeID", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Kodları görebilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = req.user ? guild.members.cache.get(req.user.id) : null;
-  const codeID = req.params.codeID;
-  if (!codeID) return res.redirect("/");
-  if (member && !member.roles.cache.has(conf.goldRole) && !member.roles.cache.has(conf.booster) && !member.roles.cache.has(conf.ownerRole) && member.roles.cache.has(conf.adminRole)) return error(res, 501, "Bu kodu görebilmek için gerekli rolleriniz bulunmamaktadır! Lütfen bilgilendirme sayfasını okuyunuz!");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ rank: "gold", id: codeID });
-  if (!code) return error(res, 404, codeID+" ID'li bir kod bulunmuyor!");
-  res.render("code", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data: code,
-    guild,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/diamond/:codeID", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Kodları görebilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = req.user ? guild.members.cache.get(req.user.id) : null;
-  const codeID = req.params.codeID;
-  if (!codeID) return res.redirect("/");
-  if (member && !member.roles.cache.has(conf.diaRole) && !member.roles.cache.has(conf.booster) && !member.roles.cache.has(conf.ownerRole) && member.roles.cache.has(conf.adminRole)) return error(res, 501, "Bu kodu görebilmek için gerekli rolleriniz bulunmamaktadır! Lütfen bilgilendirme sayfasını okuyunuz!");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ rank: "diamond", id: codeID });
-  if (!code) return error(res, 404, codeID+" ID'li bir kod bulunmuyor!");
-  res.render("code", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data: code,
-    guild,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/ready/:codeID", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Kodları görebilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = guild.members.cache.get(req.user.id);
-  const codeID = req.params.codeID;
-  if (!codeID) return res.redirect("/");
-  if (member && !member.roles.cache.has(conf.readySystemsRole) && !member.roles.cache.has(conf.booster) && !member.roles.cache.has(conf.ownerRole) && member.roles.cache.has(conf.adminRole)) return error(res, 501, "Bu kodu görebilmek için gerekli rolleriniz bulunmamaktadır! Lütfen bilgilendirme sayfasını okuyunuz!");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ rank: "ready", id: codeID });
-  if (!code) return error(res, 404, codeID+" ID'li bir kod bulunmuyor!");
-  res.render("code", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data: code,
-    guild,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/fromyou/:codeID", async (req, res) => {
-  if (!req.user || !client.guilds.cache.get(conf.guildID).members.cache.has(req.user.id)) return error(res, 138, "Kodları görebilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const codeID = req.params.codeID;
-  if (!codeID) return res.redirect("/");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ rank: "fromyou", id: codeID });
-  if (!code) return error(res, 404, codeID+" ID'li bir kod bulunmuyor!");
-  res.render("code", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    data: code,
-    guild,
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.get("/delete/:rank/:id", async (req, res) => {
-  if (!req.user) return error(res, 138, "Bu sayfaya girmek için siteye giriş yapmalısın!");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = guild.members.cache.get(req.user.id);
-  if (!member) return error(res, 138, "Bu sayfaya girmek için sunuzumuza katılmalısın!");
-  const codeData = require("./src/schemas/code");
-  const userData = require("./src/schemas/user");
-  const code = await codeData.findOne({ rank: req.params.rank, id: req.params.id });
-  if (!code) return error(res, 404, req.params.id+" ID'li bir kod bulunmuyor!");
-  if (!member.hasPermission(8) || !code.sharers.includes(req.user.id)) return error(res, 401, "Bu sayfaya girmek için yetkin bulunmuyor!");
-  
-  
-  const channel = client.channels.cache.get(conf.codeLog);
-  const embed = new MessageEmbed()
-  .setAuthor(req.user.username, member.user.avatarURL({ dynamic: true }))
-  .setThumbnail(guild.iconURL({ dynamic: true }))
-  .setTitle(`${code.rank} kategorisinde bir kod silindi!`)
-  .setDescription(`
-• Kod adı: ${code.name}
-• Kod Açıklaması: ${code.desc}
-• Kodu paylaşan: ${guild.members.cache.get(code.sharers[0]) ? guild.members.cache.get(code.sharers[0]).toString() : client.users.fetch(code.sharers[0]).then(x => x.username)}
-• Kodu silen: ${member.toString()}
-  `)
-  .setColor("RED")
-  channel.send(embed);
-  
-  const data = await userData.findOne({ userID: req.user.id });
-  if (data) {
-    data.codes = data.codes.filter(x => x.id !== req.params.id);
-    data.save();
-  }
-  
-  code.deleteOne();
-  res.redirect("/");
-});
-
-app.get("/edit/:rank/:id", async (req, res) => {
-  if (!req.user) return error(res, 138, "Bu sayfaya girmek için siteye giriş yapmalısın!");
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = guild.members.cache.get(req.user.id);
-  if (!member) return error(res, 138, "Bu sayfaya girmek için sunuzumuza katılmalısın!");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ rank: req.params.rank, id: req.params.id });
-  if (!code) return error(res, 404, req.params.id+" ID'li bir kod bulunmuyor!");
-  if (!member.hasPermission(8) || !code.sharers.includes(req.user.id)) return error(res, 401, "Bu sayfaya girmek için yetkin bulunmuyor!");
-  res.render("editCode", {
-    user: req.user,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    isStaff: client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id).roles.cache.has("783442672496803891"),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null,
-    rank: req.params.rank,
-    id: req.params.id
-  });
-});
-
-app.post("/edit", async (req, res) => {
-  const guild = client.guilds.cache.get(conf.guildID);
-  const member = req.user ? guild.members.cache.get(req.user.id) : null;
-  if (!req.user || !member) return error(res, 138, "Kod paylaşabilmek için Discord sunucumuza katılmanız ve siteye giriş yapmanız gerekmektedir.");
-  const codeData = require("./src/schemas/code");
-  const code = await codeData.findOne({ id: req.body.id });
-  console.log(code)
-  if (!code) return error(res, 404, req.body.id+" ID'li bir kod bulunmuyor!")
-  
-  let body = req.body;
-  if (!body.name) body.name = code.name;
-  if (!body.sharers) body.sharers = code.sharers;
-  if (!body.desc) body.desc = code.desc;
-  if (!body.modules) body.modules = code.modules;
-  if (!body.mainCode) body.mainCode = code.mainCode;
-  if (!body.command) body.command = code.command;
-  if (!body.rank) body.rank = code.rank;
-  
-  code.name = body.name;
-  code.sharers = body.sharers;
-  code.desc = body.desc
-  code.modules = body.modules
-  code.mainCode = body.mainCode
-  code.command = body.command
-  code.rank = body.rank
-  code.bug = null;
-  code.save();
- 
-  const channel = client.channels.cache.get(conf.codeLog);
-  const embed = new MessageEmbed()
-  .setAuthor(req.user.username, member.user.avatarURL({ dynamic: true }))
-  .setThumbnail(guild.iconURL({ dynamic: true }))
-  .setTitle("Bir kod düzenlendi!")
-  .setDescription(`
-  • Kod adı: [${body.name}](https://${conf.domain}/${body.rank}/${body.id})
-  • Kod Açıklaması: ${body.desc}
-  • Kodu paylaşan: ${member.toString()}
-  `)
-  .setColor("YELLOW");
-  channel.send(embed);
-  res.redirect(`/${body.rank}/${body.id}`);
-});
-
-app.post("/like", async (req, res) => {
-  if (!req.user) return;
-  const codeData = require("./src/schemas/code");
-  const userData = require("./src/schemas/user");
-  const code = await codeData.findOne({ id: req.body.id });
-  if (code.sharers.includes(req.user.id)) return;
-  if (code.likedUsers && code.likedUsers.includes(req.user.id)) return;
-  if (req.body.durum === "true") {
-  if (!code.likedUsers) {
-    code.likedUsers = [req.user.id]
-    code.save();
-  } else {
-    code.likedUsers.push(req.user.id)
-    code.save();
-  }
-  code.sharers.map(async x => {
-    const sharerData = await userData.findOne({ userID: x });
-    sharerData.getLikeCount += 1;
-    sharerData.save();
-  });
-  } else {
-    if (code.likedUsers && !code.likedUsers.includes(req.user.id)) return;
-    code.likedUsers = code.likedUsers.filter(x => x !== req.user.id);
-    code.save();
-    code.sharers.map(async x => {
-      const sharerData = await userData.findOne({ userID: x });
-      sharerData.getLikeCount -= 1;
-      sharerData.save();
-    });
-  }
-});
-
-app.get("/error", (req, res) => {
-  res.render("error", {
-    user: req.user,
-    statuscode: req.query.statuscode,
-    message: req.query.message,
-    icon: client.guilds.cache.get(conf.guildID).iconURL({ dynamic: true }),
-    reqMember: req.user ? client.guilds.cache.get(conf.guildID).members.cache.get(req.user.id) : null
-  });
-});
-
-app.use((req, res) => error(res, 404, "Sayfa bulunamadı!"));
-// </> Pages </>
-
-
-// </> Functions </>
-const error = (res, statuscode, message) => {
-  return res.redirect(url.format({ pathname: "/error", query: { statuscode, message }}));
+const renderTemplate = (res, req, template, data = {}) => {
+const baseData = {
+bot: client,
+path: req.path,
+user: req.isAuthenticated() ? req.user : null
+};
+res.render(path.resolve(`${templateDir}${path.sep}${template}`), Object.assign(baseData, data));
 };
 
-const randomStr = (length) => {
-  var result = '';
-  var characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  var charactersLength = characters.length;
-  for ( var i = 0; i < length; i++ ) {
-      result += characters.charAt(Math.floor(Math.random() * charactersLength));
-  }
-  return result;
+app.get("/giris", (req, res, next) => {
+if (req.session.backURL) {
+req.session.backURL = req.session.backURL;
+} else if (req.headers.referer) {
+const parsed = url.parse(req.headers.referer);
+if (parsed.hostname === app.locals.domain) {
+req.session.backURL = parsed.path;
 }
-// </> Functions </>
+} else {
+req.session.backURL = "/";
+}
+next();
+},
+passport.authenticate("discord"));
 
-app.listen(process.env.PORT || 3000);
-client.login(settings.token).catch((err) => console.log(err));
-
-client.on("ready", () => {
-  console.log("Site Hazır!");
+app.get("/baglanti-hatası", (req, res) => {
+renderTemplate(res, req, "autherror.ejs");
 });
+ 
+  
+app.get("/callback", passport.authenticate("discord", { failureRedirect: "/" }), async (req, res) => {
+if (req.session.backURL) {
+  
+const url = req.session.backURL;
+req.session.backURL = null;
+res.redirect(url);
+} else {
+  client.channels.get("688832795434549304").send(req.user.username + " sisteme giriş yaptı. 📥")
+   //client.channels.get("688832795434549304").send(req.user.username + req.user.id + " sisteme giriş yaptı. 📥")
+
+res.redirect("/");
+}
+});
+
+app.get("/cikis", async function(req, res) {
+ await client.channels.get("688832795434549304").send(req.user.username + " sistemden çıkış yaptı. 📤")
+
+req.session.destroy(() => {
+req.logout();
+res.redirect("/");
+});
+});
+
+app.get("/", (req, res) => {
+renderTemplate(res, req, "index.ejs");
+});
+  
+  app.get("/alim", (req, res) => { renderTemplate (res, req, "alim.ejs") });
+
+
+
+app.get("/terms", (req, res) => {
+  
+renderTemplate(res, req, "terms.ejs");
+});
+
+app.get("/kullanici/:userID/sil/:botID", checkAuth, (req, res) => {
+  var id = req.params.botID
+  renderTemplate(res, req, "sil.ejs", {id}) 
+});
+
+app.post("/kullanici/:userID/sil/:botID", checkAuth, (req, res) => {
+
+let ID = req.params.botID
+
+db.delete(`botlar.${ID}`) 
+db.delete(`kbotlar.${req.user.id}.${ID}`)
+
+res.redirect("/kullanici/"+req.params.userID);
+});
+app.get("/botlar", (req, res) => {
+ 
+renderTemplate(res, req, "botlar.ejs")
+});
+
+app.get("/Ekibimiz", (req, res) => {
+ 
+renderTemplate(res, req, "ekibimiz.ejs")
+});
+    
+app.get("/nasil", (req, res) => {
+ 
+renderTemplate(res, req, "nasıl.ejs")
+});
+  
+
+  
+app.get("/botyonetim/hata", (req, res) => {
+  
+renderTemplate(res, req, "hataa.ejs")
+});
+  
+app.get("/komut/:botID/rapor", checkAuth, (req, res) => {
+
+renderTemplate (res, req, "rapor.ejs");
+});
+
+app.post("/komut/:botID/rapor", checkAuth, (req, res) => {
+
+let ayar = req.body
+
+if(ayar['mesaj-1']) {
+db.push(`botlar.${req.params.botID}.raporlar`, JSON.parse(`{ "rapor":"${ayar['mesaj-1']}" }`))
+app.get("/komut/:botID", checkAuth, (req, res) => {
+
+renderTemplate (res, req, "başarılı.ejs");
+});
+client.channels.get('689066360269176833').send(`:warning: **YENİ RAPOR GELDİ!** \n   :incoming_envelope: **Raporlayan**: \`${req.user.username}#${req.user.discriminator}\`\n   :notepad_spiral: **İçerik**: \`${db.fetch(`botlar.${req.params.botID}.prefix`)}\` \n   :pencil: **Sebep**: \`${ayar['mesaj-1']}\``)
+}
+if(ayar['mesaj-2']) {
+db.push(`botlar.${req.params.botID}.raporlar`, JSON.parse(`{ "rapor":"${ayar['mesaj-2']}" }`))
+client.channels.get('689066360269176833').send(`:warning: **YENİ RAPOR GELİD!** \n   :incoming_envelope: **Raporlayan**: \`${req.user.username}#${req.user.discriminator}\`\n   :notepad_spiral: **İçerik**: \`${db.fetch(`botlar.${req.params.botID}.prefix`)}\` \n   :pencil: **Sebep**: \`${ayar['mesaj-2']}\``)
+}
+
+res.redirect('/komut/'+req.params.botID);
+});
+
+
+app.get("/komut/:botID/yorum", checkAuth, (req, res) => {
+
+renderTemplate (res, req, "yorum.ejs");
+});  
+
+app.post("/komut/:botID/yorum", checkAuth, (req, res) => {
+
+let ayar = req.body
+
+if (ayar === {}  || !ayar['yorum-1'] || !ayar['yorum-2']) return res.redirect('/botyonetim/hata')
+ {
+db.push(`botlar.${req.params.botID}.raporlar`, JSON.parse(`{ "rapor":"${ayar['yorum-2','yorum-1']}" }`))
+client.channels.get('689452095572934703').send(`:bell:  **Yorum Yapıldı** \n:incoming_envelope: **Yorum Yapan**: \`${req.user.username}#${req.user.discriminator}\`\n:notepad_spiral: **Komut İsmi**: \`${db.fetch(`botlar.${req.params.botID}.prefix`)}\` \n**Yıldız**: ${ayar['yorum-1']}\n**Yorum**: \`${ayar['yorum-2']}\``)
+}
+res.redirect('/yorum/'+req.params.botID);
+});
+
+app.get("/yorum/:botID", checkAuth, (req, res) => {
+
+renderTemplate (res, req, "başarılı2.ejs");
+});
+
+
+
+app.get("/deneme", (req, res) => {
+  
+renderTemplate(res, req, "deneme.ejs")
+});
+
+app.get("/hakkimizda", (req, res) => {
+  
+renderTemplate(res, req, "hakkımızda.ejs");
+});
+
+app.get("/botlar", (req, res) => {
+ 
+renderTemplate(res, req, "botlar.ejs")
+});
+
+app.get("/elmas", checkAuth, (req, res) => {
+  //if(!client.elmas.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+if(!client.guilds.get("653619019571527681").members.get(req.user.id).roles.has("690647576235606027")) return res.send("Altyapı rolün yok rolü alda gel.")
+client.channels.get('689080226827075688').send(`:bust_in_silhouette: \`${req.user.username}#${req.user.discriminator}\` Adlı Kişi \`Altyapı\` Adlı Kategoriye Girdi `) // kategori log
+renderTemplate(res, req, "elmas.ejs") 
+});
+
+app.get("/altin", checkAuth, (req, res) => {
+ //if(!client.altin.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+if(!client.guilds.get("653619019571527681").members.get(req.user.id).roles.has("689794694448021608")) return res.send("JS+ rolün yok rolü alda gel.")
+client.channels.get('689080226827075688').send(`:bust_in_silhouette: \`${req.user.username}#${req.user.discriminator}\` Adlı Kişi \`JS+\` Adlı Kategoriye Girdi `) // kategori log
+renderTemplate(res, req, "altin.ejs") 
+});
+
+app.get("/premium", checkAuth, (req, res) => {
+  //if(!client.premium.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+if(!client.guilds.get("653619019571527681").members.get(req.user.id).roles.has("689794755806101516")) return res.send("Premium rolün yok rolü alda gel.")
+client.channels.get('689080226827075688').send(`:bust_in_silhouette: \`${req.user.username}#${req.user.discriminator}\` Adlı Kişi \`Premium\` Adlı Kategoriye Girdi `) // kategori log
+renderTemplate(res, req, "premium.ejs") 
+});
+
+app.get("/full", checkAuth, (req, res) => {
+  //if(!client.full.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+if(!client.guilds.get("653619019571527681").members.get(req.user.id).roles.has("689794785392984121")) return res.send("Full rolün yok rolü alda gel.")
+client.channels.get('').send(`:bust_in_silhouette: \`${req.user.username}#${req.user.discriminator}\` Adlı Kişi \`Full\` Adlı Kategoriye Girdi `) // kategori log
+renderTemplate(res, req, "full.ejs") 
+});
+
+app.get("/booster", checkAuth, (req, res) => {
+  //if(!client.booster.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+if(!client.guilds.get("653619019571527681").members.get(req.user.id).roles.has("664857495327735820")) return res.send("Booster rolün yok rolü alda gel.")
+client.channels.get('689080226827075688').send(`:bust_in_silhouette: \`${req.user.username}#${req.user.discriminator}\` Adlı Kişi \`Booster\` Adlı Kategoriye Girdi `) // kategori log
+renderTemplate(res, req, "booster.ejs") 
+});
+  
+  //app.get("/booster", checkAuth, (req, res) => {
+  //if(!client.booster.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+//if(!client.guilds.get("653619019571527681").members.get(req.user.id).roles.has("664857495327735820")) return res.send("Booster rolün yok rolü alda gel.")
+//client.channels.get('689080226827075688').send(`:bust_in_silhouette: \`${req.user.username}#${req.user.discriminator}\` Adlı Kişi \`Booster\` Adlı Kategoriye Girdi `) // kategori log
+//renderTemplate(res, req, "booster.ejs") 
+//});
+  
+
+
+
+app.get("/botekle/hata", (req, res) => {
+ 
+renderTemplate(res, req, "hataaa.ejs")
+});
+
+app.get("/botekle", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+renderTemplate(res, req, "botekle.ejs") 
+});
+
+app.get("/deneme", checkAuth, (req, res) => {
+ 
+renderTemplate(res, req, "deneme.ejs")
+});
+
+app.post("/botekle", checkAuth, (req, res) => {
+
+let ayar = req.body
+
+if (ayar === {}  || !ayar['botprefix'] || !ayar['kutuphane'] || !ayar['kisa-aciklama'] || !ayar['etikett']) return res.redirect('/botyonetim/hata')
+
+let ID = ayar['botid']
+
+if (db.has('botlar')) {
+}
+  
+  var tag = ''
+  if (Array.isArray(ayar['etikett']) === true) {
+    var tag = ayar['etikett']
+  } else {
+    var tag = new Array(ayar['etikett'])
+  }
+
+request({
+url: `https://discordapp.com/api/v7/users/${req.user.id}`,
+headers: {
+"Authorization": `Bot ${process.env.TOKEN}`
+},
+}, function(error, response, body) {
+if (error) return console.log(error)
+else if (!error) {
+var sahip = JSON.parse(body)
+
+db.set(`botlar.${ID}.botid`, ayar['botid'])
+db.set(`botlar.${ID}.prefix`, ayar['botprefix'])
+db.set(`botlar.${ID}.kutuphane`, ayar['kutuphane'])
+db.set(`botlar.${ID}.sahip`, sahip.username+"#"+sahip.discriminator)
+db.set(`botlar.${ID}.sahipid`, sahip.id)
+db.set(`botlar.${ID}.kisaaciklama`, ayar['kisa-aciklama'])
+db.set(`botlar.${ID}.etiket`, tag)
+if (ayar['botsite']) {
+db.set(`botlar.${ID}.site`, ayar['botsite'])
+}
+if (ayar['github']) {
+db.set(`botlar.${ID}.github`, ayar['github'])
+}
+if (ayar['instagram']) {
+db.set(`botlar.${ID}.instagram`, ayar['instagram'])
+}
+if (ayar['botdestek']) {
+db.set(`botlar.${ID}.destek`, ayar['botdestek'])
+}
+
+db.set(`kbotlar.${req.user.id}.${ID}`, db.fetch(`botlar.${ID}`))
+
+
+res.redirect("/")
+
+}})
+
+});
+
+app.get("/kullanicilar", (req, res) => {
+  renderTemplate(res, req, "kullanicilar.ejs")
+});
+
+app.get("/kullanici/:userID", (req, res) => {
+
+  request({
+    url: `https://discordapp.com/api/v7/users/${req.params.userID}`,
+    headers: {
+      "Authorization": `Bot ${process.env.TOKEN}`
+    },
+  }, function(error, response, body) {
+    if (error) return console.log(error)
+    else if (!error) {
+      var kisi = JSON.parse(body)
+
+      renderTemplate(res, req, "kullanici.ejs", {kisi})
+    };
+  });
+
+});
+
+app.get("/kullanici/:userID/profil", (req, res) => {
+
+  request({
+    url: `https://discordapp.com/api/v7/users/${req.params.userID}`,
+    headers: {
+      "Authorization": `Bot ${process.env.TOKEN}`
+    },
+  }, function(error, response, body) {
+    if (error) return console.log(error)
+    else if (!error) {
+      var kisi = JSON.parse(body)
+
+      renderTemplate(res, req, "profil.ejs", {kisi})
+    };
+  });
+
+});
+
+app.get("/kullanici/:userID/profil/ayarla", checkAuth, (req, res) => {
+
+  renderTemplate(res, req, "p-ayarla.ejs")
+
+});
+
+app.post("/kullanici/:userID/profil/ayarla", checkAuth, (req, res) => {
+
+  if (req.params.userID !== req.user.id) return res.redirect('/');
+
+  var profil = JSON.parse(fs.readFileSync('./profil.json', 'utf8'));
+
+  var libs = ''
+  if (Array.isArray(req.body['libs']) === true) {
+    var libs = req.body['libs']
+  } else {
+    var libs = new Array(req.body['libs'])
+  }
+
+  request({
+    url: `https://discordapp.com/api/v7/users/${req.params.userID}`,
+    headers: {
+      "Authorization": `Bot ${process.env.TOKEN}`
+    },
+  }, function(error, response, body) {
+    if (error) return console.log(error)
+    else if (!error) {
+      var kisi = JSON.parse(body)
+
+  var veri = JSON.parse(`{
+  "tag": "${kisi.username}#${kisi.discriminator}",
+  "isim": "${req.body['isim']}",
+  "yas": "${req.body['yas']}",
+  "biyo": "${req.body['biyo']}",
+  "favlib": "${req.body['favlib']}",
+  "libs": "${libs}",
+  "avatar": "https://cdn.discordapp.com/avatars/${kisi.id}/${kisi.avatar}.png"
+  }`)
+
+  profil[req.user.id] = veri;
+
+  var obj = JSON.stringify(profil)
+
+  fs.writeFile('./profil.json', obj)
+
+  res.redirect('/kullanici/'+req.user.id)
+
+    }
+  })
+
+});
+
+app.get("/kullanici/:userID/panel", checkAuth, (req, res) => {
+
+renderTemplate(res, req, "panel.ejs")
+
+});
+
+app.get("/kullanici/:userID/duzenle/:botID/", checkAuth, (req, res) => {
+
+
+var id = req.params.botID
+
+
+renderTemplate(res, req, "duzenle.ejs", {id})
+
+});
+
+
+app.post("/kullanici/:userID/duzenle/:botID/", checkAuth, (req, res) => {
+
+let ayar = req.body
+let ID = req.params.botID
+let s = req.user.id
+
+var tag = ''
+  if (Array.isArray(ayar['etikett']) === true) {
+    var tag = ayar['etikett']
+  } else {
+    var tag = new Array(ayar['etikett'])
+  }
+
+request({
+url: `https://discordapp.com/api/v7/users/${ID}`,
+headers: {
+"Authorization": `Bot ${process.env.TOKEN}`
+},
+}, function(error, response, body) {
+if (error) return console.log(error)
+else if (!error) {
+var sistem = JSON.parse(body)
+
+db.set(`botlar.${ID}.isim`, sistem.username+"#"+sistem.discriminator)
+
+db.set(`botlar.${ID}.avatar`, `https://cdn.discordapp.com/avatars/${sistem.id}/${sistem.avatar}.png`)
+
+request({
+url: `https://discordapp.com/api/v7/users/${req.user.id}`,
+headers: {
+"Authorization": `Bot ${process.env.TOKEN}`
+},
+}, function(error, response, body) {
+if (error) return console.log(error)
+else if (!error) {
+var sahip = JSON.parse(body)
+db.set(`botlar.${ID}.prefix`, ayar['botprefix'])
+db.set(`botlar.${ID}.kutuphane`, ayar['kutuphane'])
+db.set(`botlar.${ID}.sahip`, sahip.username+"#"+sahip.discriminator)
+db.set(`botlar.${ID}.sahipid`, sahip.id)
+db.set(`botlar.${ID}.kisaaciklama`, ayar['kisa-aciklama'])
+db.set(`botlar.${ID}.uzunaciklama`, ayar['uzun-aciklama'])
+db.set(`botlar.${ID}.etiket`, tag)
+if (ayar['botsite']) {
+db.set(`botlar.${ID}.site`, ayar['botsite'])
+}
+if (ayar['github']) {
+db.set(`botlar.${ID}.github`, ayar['github'])
+}
+if (ayar['instagram']) {
+db.set(`botlar.${ID}.instagram`, ayar['instagram'])
+}
+if (ayar['botdestek']) {
+db.set(`botlar.${ID}.destek`, ayar['botdestek'])
+}
+
+res.redirect("/kullanici/"+req.params.userID+"/panel");
+
+
+
+}})
+}})
+
+});
+
+app.get("/kullanici/:userID/panel/:botID/sil", checkAuth, (req, res) => {
+  var id = req.params.botID
+  renderTemplate(res, req, "sil.ejs", {id}) 
+});
+
+app.post("/kullanici/:userID/panel/:botID/sil", checkAuth, (req, res) => {
+
+let ID = req.params.botID
+
+db.delete(`botlar.${ID}`) 
+db.delete(`kbotlar.${req.user.id}.${ID}`)
+
+res.redirect("/kullanici/"+req.params.userID+"/panel");
+});
+
+app.get("/bot/:botID", (req, res) => {
+var id = req.params.botID
+
+request({
+url: `https://discordapp.com/api/v7/users/${id}`,
+headers: {
+"Authorization": `Bot ${process.env.TOKEN}`
+},
+}, function(error, response, body) {
+if (error) return console.log(error)
+else if (!error) {
+var sistem = JSON.parse(body)
+
+if (db.fetch(`${id}.avatar`) !== `https://cdn.discordapp.com/avatars/${sistem.id}/${sistem.avatar}.png`) {
+db.set(`${id}.avatar`, `https://cdn.discordapp.com/avatars/${sistem.id}/${sistem.avatar}.png`)
+}
+
+}
+})
+
+renderTemplate(res, req, 'bot.ejs', {id})
+
+});
+
+app.get("/bot/:botID/hata", (req, res) => {
+renderTemplate(res, req, "hata.ejs")
+});
+
+app.get("/bot/:botID/oyver", checkAuth, (req, res) => {
+
+var id = req.params.botID
+let user = req.user.id
+
+var saat = `${new Date().getHours() + 3}:${new Date().getMinutes()}:${new Date().getSeconds()}`
+
+if (db.has(`oylar.${id}.${user}`) === true) {
+  if (db.fetch(`oylar.${id}.${user}`) !== saat) {
+    res.redirect('/bot/'+req.params.botID+'/hata')
+    return
+  } else if (db.fetch(`oylar.${id}.${user}`) === saat) {
+  db.add(`botlar.${id}.oy`, 1)
+  db.set(`oylar.${id}.${user}`, saat)
+  }
+} else {
+  db.add(`botlar.${id}.oy`, 1)
+  db.set(`oylar.${id}.${user}`, saat)
+}
+
+res.redirect('/bot/'+req.params.botID)
+
+});
+  
+  app.get("/yetkili/hata", (req, res) => {renderTemplate(res, req, "hate.ejs")})
+
+app.get("/yetkili", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+renderTemplate(res, req, "y-panel.ejs") 
+});
+
+app.get("/botyonetici/onayla/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Onaylı')
+
+res.redirect("/yetkili")
+
+
+});
+
+app.get("/botyonetici/altin/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Altin')
+
+res.redirect("/yetkili")
+client.channels.get(client.ayarlar.kayıt).send(`:bookmark_tabs: **YENİ KOMUT EKLENDİ!** \n :boom: **Ekleyen**: \`${db.fetch(`botlar.${id}.sahip`)}\` \n :label: **Kategori**:\`Altın\`  \n :mag_right: **İçerik**:\`${db.fetch(`botlar.${id}.prefix`)}\` `)
+
+
+});
+
+app.get("/botyonetici/elmas/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Elmas')
+
+res.redirect("/yetkili")
+client.channels.get(client.ayarlar.kayıt).send(`:bookmark_tabs: **YENİ KOMUT EKLENDİ!** \n :boom: **Ekleyen**: \`${db.fetch(`botlar.${id}.sahip`)}\` \n :label: **Kategori**:\`Elmas\`  \n :mag_right: **İçerik**:\`${db.fetch(`botlar.${id}.prefix`)}\` `)
+  
+
+
+});
+
+app.get("/botyonetici/premium/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Premium')
+
+res.redirect("/yetkili")
+client.channels.get(client.ayarlar.kayıt).send(`:bookmark_tabs: **YENİ KOMUT EKLENDİ!** \n :boom: **Ekleyen**: \`${db.fetch(`botlar.${id}.sahip`)}\` \n :label: **Kategori**:\`Premium\`  \n :mag_right: **İçerik**:\`${db.fetch(`botlar.${id}.prefix`)}\` `)
+ 
+
+
+});
+
+app.get("/botyonetici/full/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Full')
+
+res.redirect("/yetkili")
+client.channels.get(client.ayarlar.kayıt).send(`:bookmark_tabs: **YENİ KOMUT EKLENDİ!** \n :boom: **Ekleyen**: \`${db.fetch(`botlar.${id}.sahip`)}\` \n :label: **Kategori**:\`Full\`  \n :mag_right: **İçerik**:\`${db.fetch(`botlar.${id}.prefix`)}\` `)
+
+
+});
+
+app.get("/botyonetici/booster/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Booster')
+
+res.redirect("/yetkili")
+client.channels.get(client.ayarlar.kayıt).send(`:bookmark_tabs: **YENİ KOMUT EKLENDİ!** \n :boom: **Ekleyen**: \`${db.fetch(`botlar.${id}.sahip`)}\` \n :label: **Kategori**:\`Booster\`  \n :mag_right: **İçerik**:\`${db.fetch(`botlar.${id}.prefix`)}\` `)
+
+
+});
+
+app.get("/botyonetici/bekleme/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+let id = req.params.botID
+
+db.set(`botlar.${id}.durum`, 'Beklemede')
+
+res.redirect("/yetkili")
+
+
+
+});
+
+app.get("/botyonetici/reddet/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+  renderTemplate(res, req, "reddet.ejs")
+});
+
+app.post("/botyonetici/reddet/:botID", checkAuth, (req, res) => {
+  if(!client.yetkililer.includes(req.user.id) ) return res.redirect('/yetkili/hata')
+  let id = req.params.botID
+  
+  res.redirect("/yetkili")
+  
+
+  
+  db.delete(`botlar.${id}`) 
+  db.delete(`kbotlar.${req.user.id}.${id}`)
+  
+  });
+
+//API
+  
+app.get("/api", (req, res) => {
+  renderTemplate(res, req, "api.ejs")
+});
+
+app.get("/api/botlar", (req, res) => {
+  res.json({
+    hata: 'Bir bot ID yazınız.'
+  });
+});
+
+app.get("/api/botlar/:botID/oylar", (req, res) => {
+  res.json({
+    hata: 'Bir kullanıcı ID yazınız.'
+  });
+});
+
+app.get("/api/botlar/:botID", (req, res) => {
+   var id = req.params.botID
+
+   if (db.has('botlar')) {
+      if (Object.keys(db.fetch('botlar')).includes(id) === false) {
+     res.json({
+       hata: 'Yazdığınız ID\'e sahip bir bot sistemde bulunmuyor.'
+     });
+   }
+  }
+
+    res.json({
+       isim: db.fetch(`botlar.${id}.isim`),
+       id: id,
+avatar: db.fetch(`botlar.${id}.avatar`),
+prefix: db.fetch(`botlar.${id}.prefix`),
+kütüphane: db.fetch(`botlar.${id}.Ayarlanabilir`),
+kütüphane: db.fetch(`botlar.${id}.kutuphane`),
+sahip: db.fetch(`botlar.${id}.sahip`),
+sahipid: db.fetch(`botlar.${id}.sahipid`),
+kisa_aciklama: db.fetch(`botlar.${id}.kisaaciklama`),
+uzun_aciklama: db.fetch(`botlar.${id}.uzunaciklama`),
+etiketler: db.fetch(`botlar.${id}.etiket`),
+destek_sunucusu: db.fetch(`botlar.${id}.destek`) || 'Belirtilmemiş',
+web_sitesi: db.fetch(`botlar.${id}.site`) || 'Belirtilmemiş',
+github: db.fetch(`botlar.${id}.github`) || 'Belirtilmemiş',
+instagram: db.fetch(`botlar.${id}.instagram`) || 'Belirtilmemiş',
+durum: db.has(`botlar.${id}.durum`) ? db.fetch(`botlar.${id}.durum`) : 'Beklemede',
+oy_sayisi: db.fetch(`botlar.${id}.oy`) || 0,
+altin: db.fetch(`botlar.${id}.altin`) || 'Bulunmuyor',
+elmas: db.fetch(`botlar.${id}.elmas`) || 'Bulunmuyor',
+premium: db.fetch(`botlar.${id}.premium`) || 'Bulunmuyor',
+full: db.fetch(`botlar.${id}.full`) || 'Bulunmuyor',
+booster: db.fetch(`botlar.${id}.booster`) || 'Bulunmuyor'
+    });
+});
+
+  app.get("/api/tumbotlar", (req, res) => {
+    res.json(Object.keys(db.fetch('botlar')));
+  });
+  
+app.get("/api/botlar/:botID/oylar/:kullaniciID", (req, res) => {
+  var id = req.params.botID
+  var userr = req.params.kullaniciID
+
+  if (db.has('botlar')) {
+      if (Object.keys(db.fetch('botlar')).includes(id) === false) {
+     res.json({
+       hata: 'Yazdığınız ID\'e sahip bir bot sistemde bulunmuyor.'
+     });
+   }
+  }
+ 
+   res.json({
+     oy_durum: db.has(`oylar.${id}.${userr}`) ? `Bugün oy vermiş.` : null,
+     oy_sayisi: db.fetch(`botlar.${id}.oy`) || 0
+   });
+
+});
+
+app.listen(3000);
+
+//Blog
+
+};
+
+
+
+
+
+
+
+
+//<%- include('ek/header', {bot, user, path}) %>
+//<div class="container">
+	//<div class="jumbotron">
+		//<div align="center">
+        //<h3 style="color:#fff">Hm, sanırım daha sunucuda bile yoksun! Lütfen, katıl! ()</h3>
+   // </div>
+//</div>
+//</div></div></div>
+
+////üst kısım html/hatea1.ejs 
+
+
+//app kısmı
+// app.get("/bağlancak yer", checkAuth, (req, res) => {
+//renderTemplate(res, req, "hatea1.ejs")
+//});
+ // app.get("/free", checkAuth, (req, res) => {
+//if(!client.guilds.get("id").members.get(req.user.id)) return res.redirect("/sunucuhata");
+//renderTemplate(res, req, "free.ejs") 
